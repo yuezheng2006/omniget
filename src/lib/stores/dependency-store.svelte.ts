@@ -19,3 +19,16 @@ export async function refreshYtdlpStatus(): Promise<void> {
   }
   checked = true;
 }
+
+/** Poll until bundled yt-dlp is ready or timeout (startup auto-install). */
+export function watchYtdlpStatus(maxMs = 120_000): () => void {
+  const started = Date.now();
+  const interval = setInterval(async () => {
+    if (ytdlpAvailable || Date.now() - started >= maxMs) {
+      clearInterval(interval);
+      return;
+    }
+    await refreshYtdlpStatus();
+  }, 2000);
+  return () => clearInterval(interval);
+}

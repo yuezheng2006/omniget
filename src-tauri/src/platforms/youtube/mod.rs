@@ -1,5 +1,5 @@
 use omniget_core::models::progress::ProgressUpdate;
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -142,6 +142,7 @@ impl YouTubeDownloader {
         let author = json
             .get("uploader")
             .or_else(|| json.get("channel"))
+            .or_else(|| json.get("uploader_id"))
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
             .to_string();
@@ -163,7 +164,7 @@ impl YouTubeDownloader {
         }
 
         let mut qualities: Vec<MediaVideoQuality> = Vec::new();
-        let mut seen_heights: HashSet<u32> = HashSet::new();
+        let mut best_by_height: HashMap<u32, (u32, u32, bool, f64)> = HashMap::new();
 
         if let Some(formats) = json.get("formats").and_then(|v| v.as_array()) {
             for f in formats {
@@ -171,32 +172,49 @@ impl YouTubeDownloader {
                 let width = f.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                 let vcodec = f.get("vcodec").and_then(|v| v.as_str()).unwrap_or("none");
                 let acodec = f.get("acodec").and_then(|v| v.as_str()).unwrap_or("none");
+                let tbr = f.get("tbr").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let filesize = f.get("filesize").and_then(|v| v.as_u64()).unwrap_or(0);
 
                 if vcodec == "none" || height == 0 {
                     continue;
                 }
 
                 let has_audio = acodec != "none";
+                let score = if tbr > 0.0 {
+                    tbr
+                } else if filesize > 0 {
+                    filesize as f64
+                } else {
+                    1.0
+                };
 
-                if seen_heights.insert(height) {
-                    let label = if has_audio {
-                        format!("{}p", height)
-                    } else {
-                        format!("{}p (HD)", height)
-                    };
-
-                    qualities.push(MediaVideoQuality {
-                        label,
-                        width,
-                        height,
-                        url: format!("https://www.youtube.com/watch?v={}", video_id),
-                        format: "ytdlp".to_string(),
-                    });
+                let entry = best_by_height.entry(height).or_insert((width, height, has_audio, 0.0));
+                if score > entry.3 {
+                    *entry = (width, height, has_audio, score);
                 }
             }
         }
 
-        qualities.sort_by(|a, b| b.height.cmp(&a.height));
+        let mut sorted_heights: Vec<u32> = best_by_height.keys().copied().collect();
+        sorted_heights.sort_by(|a, b| b.cmp(a));
+
+        for height in sorted_heights {
+            if let Some(&(width, _, has_audio, _)) = best_by_height.get(&height) {
+                let label = if has_audio {
+                    format!("{}p", height)
+                } else {
+                    format!("{}p (HD)", height)
+                };
+
+                qualities.push(MediaVideoQuality {
+                    label,
+                    width,
+                    height,
+                    url: format!("https://www.youtube.com/watch?v={}", video_id),
+                    format: "ytdlp".to_string(),
+                });
+            }
+        }
 
         if qualities.is_empty() {
             qualities.push(MediaVideoQuality {
@@ -472,5 +490,180 @@ impl YouTubeDownloader {
             duration_seconds: 0.0,
             torrent_id: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn create_test_format(height: u32, width: u32, tbr: f64, has_audio: bool) -> serde_json::Value {
+        json!({
+            "height": height,
+            "width": width,
+            "tbr": tbr,
+            "vcodec": "avc1.640028",
+            "acodec": if has_audio { "mp4a.40.2" } else { "none" }
+        })
+    }
+
+    #[test]
+    fn test_parse_video_info_picks_best_by_tbr() {
+        let json = json!({
+            "id": "test123",
+            "title": "Test Video",
+            "uploader": "Test Author",
+            "duration": 123.45,
+            "thumbnail": "https://example.com/thumb.jpg",
+            "formats": [
+                create_test_format(1080, 1920, 5000.0, true),
+                create_test_format(1080, 1920, 8000.0, true),
+                create_test_format(1080, 1920, 6000.0, true),
+                create_test_format(720, 1280, 3000.0, true),
+                create_test_format(720, 1280, 4000.0, true),
+                create_test_format(720, 1280, 3500.0, true),
+            ]
+        });
+
+        let result = YouTubeDownloader::parse_video_info(&json).unwrap();
+
+        assert_eq!(result.title, "Test Video");
+        assert_eq!(result.author, "Test Author");
+
+        // Should have exactly 2 qualities, not 6
+        assert_eq!(result.available_qualities.len(), 2);
+
+        // Check that they are sorted descending
+        assert_eq!(result.available_qualities[0].height, 1080);
+        assert_eq!(result.available_qualities[1].height, 720);
+
+        // Check labels (all have audio)
+        assert_eq!(result.available_qualities[0].label, "1080p");
+        assert_eq!(result.available_qualities[1].label, "720p");
+    }
+
+    #[test]
+    fn test_parse_video_info_labels_for_audio_only_formats() {
+        let json = json!({
+            "id": "test123",
+            "title": "Test Video",
+            "uploader": "Test Author",
+            "formats": [
+                {
+                    "height": 1080,
+                    "width": 1920,
+                    "tbr": 8000.0,
+                    "vcodec": "avc1.640028",
+                    "acodec": "none"
+                },
+                {
+                    "height": 720,
+                    "width": 1280,
+                    "tbr": 4000.0,
+                    "vcodec": "avc1.4d401f",
+                    "acodec": "mp4a.40.2"
+                }
+            ]
+        });
+
+        let result = YouTubeDownloader::parse_video_info(&json).unwrap();
+
+        assert_eq!(result.available_qualities.len(), 2);
+        assert_eq!(result.available_qualities[0].label, "1080p (HD)"); // No audio
+        assert_eq!(result.available_qualities[1].label, "720p"); // Has audio
+    }
+
+    #[test]
+    fn test_parse_video_info_fallback_to_filesize_when_no_tbr() {
+        let json = json!({
+            "id": "test123",
+            "title": "Test Video",
+            "uploader": "Test Author",
+            "formats": [
+                {
+                    "height": 1080,
+                    "width": 1920,
+                    "filesize": 100_000_000,
+                    "vcodec": "avc1.640028",
+                    "acodec": "mp4a.40.2"
+                },
+                {
+                    "height": 1080,
+                    "width": 1920,
+                    "filesize": 150_000_000,
+                    "vcodec": "vp09.00.50.08",
+                    "acodec": "mp4a.40.2"
+                },
+                {
+                    "height": 1080,
+                    "width": 1920,
+                    "filesize": 120_000_000,
+                    "vcodec": "avc1.64002a",
+                    "acodec": "mp4a.40.2"
+                }
+            ]
+        });
+
+        let result = YouTubeDownloader::parse_video_info(&json).unwrap();
+
+        assert_eq!(result.available_qualities.len(), 1);
+        assert_eq!(result.available_qualities[0].height, 1080);
+    }
+
+    #[test]
+    fn test_parse_video_info_livestream_returns_error() {
+        let json = json!({
+            "id": "live123",
+            "title": "Live Stream",
+            "uploader": "Test Author",
+            "is_live": true,
+            "formats": []
+        });
+
+        let result = YouTubeDownloader::parse_video_info(&json);
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "Livestreams not supported");
+    }
+
+    #[test]
+    fn test_extract_video_id_from_youtube_com() {
+        let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+        assert_eq!(YouTubeDownloader::extract_video_id(url), Some("dQw4w9WgXcQ".into()));
+    }
+
+    #[test]
+    fn test_extract_video_id_from_youtu_be() {
+        let url = "https://youtu.be/dQw4w9WgXcQ";
+        assert_eq!(YouTubeDownloader::extract_video_id(url), Some("dQw4w9WgXcQ".into()));
+    }
+
+    #[test]
+    fn test_extract_video_id_from_embed() {
+        let url = "https://www.youtube.com/embed/dQw4w9WgXcQ";
+        assert_eq!(YouTubeDownloader::extract_video_id(url), Some("dQw4w9WgXcQ".into()));
+    }
+
+    #[test]
+    fn test_extract_video_id_from_shorts() {
+        let url = "https://www.youtube.com/shorts/dQw4w9WgXcQ";
+        assert_eq!(YouTubeDownloader::extract_video_id(url), Some("dQw4w9WgXcQ".into()));
+    }
+
+    #[test]
+    fn test_is_playlist_url() {
+        assert!(YouTubeDownloader::is_playlist_url("https://www.youtube.com/playlist?list=PL123456789"));
+        assert!(YouTubeDownloader::is_playlist_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL123456789"));
+        assert!(!YouTubeDownloader::is_playlist_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ"));
+    }
+
+    #[test]
+    fn test_can_handle() {
+        let downloader = YouTubeDownloader::new();
+        assert!(downloader.can_handle("https://www.youtube.com/watch?v=dQw4w9WgXcQ"));
+        assert!(downloader.can_handle("https://youtu.be/dQw4w9WgXcQ"));
+        assert!(downloader.can_handle("https://www.youtube-nocookie.com/watch?v=dQw4w9WgXcQ"));
+        assert!(!downloader.can_handle("https://www.example.com/video"));
     }
 }

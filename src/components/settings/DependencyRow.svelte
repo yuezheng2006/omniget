@@ -15,11 +15,12 @@
     installed: boolean;
     version: string | null;
     busy: boolean;
+    autoManaged?: boolean;
     onInstall: (variant: string | null) => void | Promise<void>;
     onAfterCustomFile?: () => void | Promise<void>;
   };
 
-  let { name, installed, version, busy, onInstall, onAfterCustomFile }: Props =
+  let { name, installed, version, busy, autoManaged = false, onInstall, onAfterCustomFile }: Props =
     $props();
 
   let variants = $state<DependencyVariantInfo[]>([]);
@@ -130,179 +131,165 @@
   let supportsCustomFile = $derived(name === "PDFium");
 </script>
 
-<tr class="deps-table-row">
-  <td class="deps-cell-name">
-    <span class="deps-name">{name}</span>
-  </td>
-  <td class="deps-cell-version">
+<div class="dep-row">
+  <div class="dep-info">
+    <span class="dep-name">{name}</span>
     {#if installed && version}
-      <span class="deps-version">v{version}</span>
+      <span class="dep-version dep-ok">v{version}</span>
     {:else}
-      <span class="deps-version deps-version-missing">—</span>
+      <span class="dep-version dep-missing">{$t("settings.dependencies.not_found")}</span>
     {/if}
-  </td>
-  <td class="deps-cell-status">
-    {#if installed}
-      <span class="deps-status deps-status-ok">{$t("settings.dependencies.status_installed")}</span>
-    {:else}
-      <span class="deps-status deps-status-missing">{$t("settings.dependencies.status_missing")}</span>
+  </div>
+
+  <div class="dep-actions">
+    {#if variants.length > 0}
+      <select
+        class="variant-select"
+        value={selectedVariant ?? ""}
+        onchange={(e) => (selectedVariant = (e.currentTarget as HTMLSelectElement).value)}
+        disabled={busy}
+        aria-label={$t("settings.dependencies.variant_aria") as string}
+      >
+        {#each variants as v (v.id)}
+          <option value={v.id}>
+            {v.label}{v.recommended ? " ★" : ""}
+          </option>
+        {/each}
+      </select>
     {/if}
-  </td>
-  <td class="deps-cell-action">
-    <div class="deps-actions">
-      {#if variants.length > 0}
-        <select
-          class="variant-select"
-          value={selectedVariant ?? ""}
-          onchange={(e) => (selectedVariant = (e.currentTarget as HTMLSelectElement).value)}
-          disabled={busy}
-          aria-label={$t("settings.dependencies.variant_aria") as string}
-        >
-          {#each variants as v (v.id)}
-            <option value={v.id}>
-              {v.label}{v.recommended ? " ★" : ""}
-            </option>
-          {/each}
-        </select>
-      {/if}
 
-      {#if busy}
-        <span class="dep-spinner" aria-hidden="true"></span>
-      {:else}
-        <button class="button dep-btn" onclick={handleInstall}>
-          {#if installed}
-            {$t("settings.dependencies.update")}
-          {:else}
-            {$t("settings.dependencies.install")}
-          {/if}
-        </button>
-      {/if}
-
-      <div class="menu-wrap">
-        <button
-          type="button"
-          class="menu-btn"
-          onclick={toggleMenu}
-          disabled={busy}
-          aria-label={$t("settings.dependencies.more_options") as string}
-          aria-haspopup="menu"
-          aria-expanded={menuOpen}
-        >
-          ⋯
-        </button>
-        {#if menuOpen}
-          <div class="menu" role="menu">
-            {#if supportsCustomFile}
-              <button type="button" class="menu-item" onclick={handlePickCustom} role="menuitem">
-                {$t("settings.dependencies.pick_custom_file")}
-              </button>
-            {/if}
-            <button
-              type="button"
-              class="menu-item"
-              onclick={handleShowFolder}
-              disabled={!installDir}
-              role="menuitem"
-            >
-              {$t("settings.dependencies.show_folder")}
-            </button>
-            {#if installDir}
-              <div class="menu-path" title={installDir}>
-                <code>{installDir}</code>
-              </div>
-            {/if}
-          </div>
+    {#if busy || (autoManaged && !installed)}
+      <span class="dep-spinner"></span>
+    {:else if !autoManaged}
+      <button class="button dep-btn" onclick={handleInstall}>
+        {#if installed}
+          {$t("settings.dependencies.update")}
+        {:else}
+          {$t("settings.dependencies.install")}
         {/if}
-      </div>
+      </button>
+    {/if}
+
+    <div class="menu-wrap">
+      <button
+        type="button"
+        class="menu-btn"
+        onclick={toggleMenu}
+        disabled={busy}
+        aria-label={$t("settings.dependencies.more_options") as string}
+        aria-haspopup="menu"
+        aria-expanded={menuOpen}
+      >
+        ⋯
+      </button>
+      {#if menuOpen}
+        <div class="menu" role="menu">
+          {#if supportsCustomFile}
+            <button type="button" class="menu-item" onclick={handlePickCustom} role="menuitem">
+              {$t("settings.dependencies.pick_custom_file")}
+            </button>
+          {/if}
+          <button
+            type="button"
+            class="menu-item"
+            onclick={handleShowFolder}
+            disabled={!installDir}
+            role="menuitem"
+          >
+            {$t("settings.dependencies.show_folder")}
+          </button>
+          {#if installDir}
+            <div class="menu-path" title={installDir}>
+              <code>{installDir}</code>
+            </div>
+          {/if}
+        </div>
+      {/if}
     </div>
-  </td>
-</tr>
+  </div>
+</div>
 
 <style>
-  .deps-name {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text);
-  }
-  .deps-version {
-    font-size: 12px;
-    font-family: var(--font-mono, ui-monospace, monospace);
-    color: var(--text-dim, var(--gray));
-  }
-  .deps-version-missing {
-    opacity: 0.5;
-  }
-  .deps-status {
-    display: inline-flex;
-    padding: 2px 8px;
-    border-radius: 999px;
-    font-size: 11px;
-    font-weight: 600;
-  }
-  .deps-status-ok {
-    background: color-mix(in srgb, var(--success, #16a34a) 18%, transparent);
-    color: var(--success, #16a34a);
-  }
-  .deps-status-missing {
-    background: color-mix(in srgb, var(--text) 8%, transparent);
-    color: var(--text-dim, var(--gray));
-  }
-  .deps-actions {
+  .dep-row {
     display: flex;
     align-items: center;
-    justify-content: flex-end;
-    gap: 6px;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 0;
+    flex-wrap: wrap;
+  }
+  .dep-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 120px;
+  }
+  .dep-name {
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .dep-version {
+    font-size: 11px;
+    color: color-mix(in oklab, currentColor 60%, transparent);
+    font-family: var(--font-mono, ui-monospace, monospace);
+  }
+  .dep-version.dep-ok {
+    color: var(--success, #16a34a);
+  }
+  .dep-version.dep-missing {
+    color: color-mix(in oklab, currentColor 50%, transparent);
+    font-style: italic;
+  }
+  .dep-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     flex-wrap: wrap;
   }
   .variant-select {
     padding: 5px 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
-    background: var(--surface);
-    color: var(--text);
+    border: 1px solid color-mix(in oklab, var(--content-border) 70%, transparent);
+    border-radius: 6px;
+    background: var(--bg);
+    color: inherit;
     font: inherit;
     font-size: 12px;
-    max-width: 160px;
+    max-width: 220px;
   }
   .variant-select:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }
   .button.dep-btn {
-    padding: 5px 12px;
-    border-radius: var(--radius-sm, 6px);
-    border: none;
+    padding: 6px 14px;
+    border-radius: 6px;
+    border: 1px solid color-mix(in oklab, var(--content-border) 70%, transparent);
     background: var(--accent);
-    color: var(--on-accent, white);
+    color: var(--accent-contrast, white);
     font: inherit;
     font-size: 12px;
     font-weight: 500;
     cursor: pointer;
-    white-space: nowrap;
   }
-  @media (hover: hover) {
-    .button.dep-btn:hover {
-      filter: brightness(1.05);
-    }
+  .button.dep-btn:hover {
+    filter: brightness(1.05);
   }
   .menu-wrap {
     position: relative;
   }
   .menu-btn {
     padding: 5px 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
+    border: 1px solid color-mix(in oklab, var(--content-border) 70%, transparent);
+    border-radius: 6px;
     background: transparent;
-    color: var(--text);
+    color: inherit;
     font: inherit;
     font-size: 14px;
     line-height: 1;
     cursor: pointer;
   }
-  @media (hover: hover) {
-    .menu-btn:hover:not(:disabled) {
-      background: color-mix(in oklab, var(--text) 8%, transparent);
-    }
+  .menu-btn:hover:not(:disabled) {
+    background: color-mix(in oklab, currentColor 8%, transparent);
   }
   .menu-btn:disabled {
     opacity: 0.4;
@@ -314,10 +301,10 @@
     right: 0;
     z-index: 50;
     min-width: 240px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md, 8px);
-    box-shadow: var(--elev-2, 0 8px 24px rgba(0, 0, 0, 0.2));
+    background: var(--surface, var(--bg));
+    border: 1px solid color-mix(in oklab, var(--content-border) 60%, transparent);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px color-mix(in oklab, black 30%, transparent);
     padding: 4px;
     display: flex;
     flex-direction: column;
@@ -326,17 +313,15 @@
     padding: 8px 12px;
     border: 0;
     background: transparent;
-    color: var(--text);
+    color: inherit;
     font: inherit;
     font-size: 12px;
     text-align: left;
     border-radius: 4px;
     cursor: pointer;
   }
-  @media (hover: hover) {
-    .menu-item:hover:not(:disabled) {
-      background: color-mix(in oklab, var(--accent) 10%, transparent);
-    }
+  .menu-item:hover:not(:disabled) {
+    background: color-mix(in oklab, var(--accent) 10%, transparent);
   }
   .menu-item:disabled {
     opacity: 0.4;
@@ -344,13 +329,13 @@
   }
   .menu-path {
     padding: 6px 12px 4px;
-    border-top: 1px solid var(--border);
+    border-top: 1px solid color-mix(in oklab, var(--content-border) 40%, transparent);
     margin-top: 4px;
   }
   .menu-path code {
     font-family: var(--font-mono, ui-monospace, monospace);
     font-size: 10px;
-    color: var(--text-dim, var(--gray));
+    color: color-mix(in oklab, currentColor 55%, transparent);
     word-break: break-all;
     display: block;
     line-height: 1.4;
@@ -358,7 +343,7 @@
   .dep-spinner {
     width: 16px;
     height: 16px;
-    border: 2px solid color-mix(in oklab, var(--text) 30%, transparent);
+    border: 2px solid color-mix(in oklab, currentColor 30%, transparent);
     border-top-color: var(--accent);
     border-radius: 50%;
     animation: spin 800ms linear infinite;

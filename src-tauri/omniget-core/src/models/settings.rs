@@ -444,7 +444,7 @@ impl Default for AppSettings {
             schema_version: 1,
             appearance: AppearanceSettings {
                 theme: "system".into(),
-                language: "en".into(),
+                language: "zh".into(),
             },
             download: DownloadSettings {
                 default_output_dir: dirs::download_dir().unwrap_or_else(|| PathBuf::from(".")),

@@ -1,5 +1,5 @@
 use omniget_core::models::progress::ProgressUpdate;
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -96,7 +96,7 @@ impl GenericYtdlpDownloader {
         let media_type = Self::detect_media_type(json);
 
         let mut qualities: Vec<MediaVideoQuality> = Vec::new();
-        let mut seen_heights: HashSet<u32> = HashSet::new();
+        let mut best_by_height: HashMap<u32, (u32, u32, f64)> = HashMap::new();
 
         if media_type == MediaType::Video {
             if let Some(formats) = json.get("formats").and_then(|v| v.as_array()) {
@@ -104,24 +104,42 @@ impl GenericYtdlpDownloader {
                     let height = f.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                     let width = f.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                     let vcodec = f.get("vcodec").and_then(|v| v.as_str()).unwrap_or("none");
+                    let tbr = f.get("tbr").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let filesize = f.get("filesize").and_then(|v| v.as_u64()).unwrap_or(0);
 
                     if vcodec == "none" || height == 0 {
                         continue;
                     }
 
-                    if seen_heights.insert(height) {
-                        qualities.push(MediaVideoQuality {
-                            label: format!("{}p", height),
-                            width,
-                            height,
-                            url: webpage_url.clone(),
-                            format: "ytdlp".to_string(),
-                        });
+                    let score = if tbr > 0.0 {
+                        tbr
+                    } else if filesize > 0 {
+                        filesize as f64
+                    } else {
+                        1.0
+                    };
+
+                    let entry = best_by_height.entry(height).or_insert((width, height, 0.0));
+                    if score > entry.2 {
+                        *entry = (width, height, score);
                     }
                 }
             }
 
-            qualities.sort_by(|a, b| b.height.cmp(&a.height));
+            let mut sorted_heights: Vec<u32> = best_by_height.keys().copied().collect();
+            sorted_heights.sort_by(|a, b| b.cmp(a));
+
+            for height in sorted_heights {
+                if let Some(&(width, _, _)) = best_by_height.get(&height) {
+                    qualities.push(MediaVideoQuality {
+                        label: format!("{}p", height),
+                        width,
+                        height,
+                        url: webpage_url.clone(),
+                        format: "ytdlp".to_string(),
+                    });
+                }
+            }
         }
 
         if qualities.is_empty() {
@@ -541,4 +559,283 @@ fn platform_referer(url: &str) -> Option<&'static str> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn create_test_format(height: u32, width: u32, tbr: f64, vcodec: &str) -> serde_json::Value {
+        json!({
+            "height": height,
+            "width": width,
+            "tbr": tbr,
+            "vcodec": vcodec,
+            "acodec": "mp4a.40.2"
+        })
+    }
+
+    #[test]
+    fn test_parse_video_info_picks_best_by_tbr() {
+        let json = json!({
+            "title": "Test Video",
+            "uploader": "Test Author",
+            "duration": 123.45,
+            "thumbnail": "https://example.com/thumb.jpg",
+            "webpage_url": "https://example.com/video",
+            "extractor_key": "generic",
+            "formats": [
+                create_test_format(1080, 1920, 5000.0, "avc1.640028"),
+                create_test_format(1080, 1920, 8000.0, "avc1.640028"),
+                create_test_format(1080, 1920, 6000.0, "vp09.00.50.08"),
+                create_test_format(720, 1280, 3000.0, "avc1.4d401f"),
+                create_test_format(720, 1280, 4000.0, "vp09.00.40.08"),
+                create_test_format(720, 1280, 3500.0, "avc1.4d401e"),
+            ]
+        });
+
+        let result = GenericYtdlpDownloader::parse_video_info(&json).unwrap();
+
+        assert_eq!(result.title, "Test Video");
+        assert_eq!(result.author, "Test Author");
+
+        // Should have exactly 2 qualities, not 6
+        assert_eq!(result.available_qualities.len(), 2);
+
+        // Check that they are sorted descending
+        assert_eq!(result.available_qualities[0].height, 1080);
+        assert_eq!(result.available_qualities[1].height, 720);
+    }
+
+    #[test]
+    fn test_parse_video_info_fallback_to_filesize_when_no_tbr() {
+        let json = json!({
+            "title": "Test Video",
+            "uploader": "Test Author",
+            "webpage_url": "https://example.com/video",
+            "extractor_key": "generic",
+            "formats": [
+                {
+                    "height": 1080,
+                    "width": 1920,
+                    "filesize": 100_000_000,
+                    "vcodec": "avc1.640028",
+                    "acodec": "mp4a.40.2"
+                },
+                {
+                    "height": 1080,
+                    "width": 1920,
+                    "filesize": 150_000_000,
+                    "vcodec": "vp09.00.50.08",
+                    "acodec": "mp4a.40.2"
+                },
+                {
+                    "height": 1080,
+                    "width": 1920,
+                    "filesize": 120_000_000,
+                    "vcodec": "avc1.64002a",
+                    "acodec": "mp4a.40.2"
+                }
+            ]
+        });
+
+        let result = GenericYtdlpDownloader::parse_video_info(&json).unwrap();
+
+        assert_eq!(result.available_qualities.len(), 1);
+        assert_eq!(result.available_qualities[0].height, 1080);
+    }
+
+    #[test]
+    fn test_parse_video_info_fallback_to_first_when_no_tbr_or_filesize() {
+        let json = json!({
+            "title": "Test Video",
+            "uploader": "Test Author",
+            "webpage_url": "https://example.com/video",
+            "extractor_key": "generic",
+            "formats": [
+                {
+                    "height": 1080,
+                    "width": 1920,
+                    "vcodec": "avc1.640028",
+                    "acodec": "mp4a.40.2"
+                },
+                {
+                    "height": 1080,
+                    "width": 1920,
+                    "vcodec": "vp09.00.50.08",
+                    "acodec": "mp4a.40.2"
+                }
+            ]
+        });
+
+        let result = GenericYtdlpDownloader::parse_video_info(&json).unwrap();
+
+        assert_eq!(result.available_qualities.len(), 1);
+        assert_eq!(result.available_qualities[0].height, 1080);
+    }
+
+    #[test]
+    fn test_parse_video_info_skips_formats_without_video() {
+        let json = json!({
+            "title": "Test Video",
+            "uploader": "Test Author",
+            "webpage_url": "https://example.com/video",
+            "extractor_key": "generic",
+            "formats": [
+                {
+                    "height": 1080,
+                    "width": 1920,
+                    "tbr": 8000.0,
+                    "vcodec": "none",
+                    "acodec": "mp4a.40.2"
+                },
+                {
+                    "height": 720,
+                    "width": 1280,
+                    "tbr": 4000.0,
+                    "vcodec": "avc1.4d401f",
+                    "acodec": "mp4a.40.2"
+                }
+            ]
+        });
+
+        let result = GenericYtdlpDownloader::parse_video_info(&json).unwrap();
+
+        assert_eq!(result.available_qualities.len(), 1);
+        assert_eq!(result.available_qualities[0].height, 720);
+    }
+
+    #[test]
+    fn test_parse_video_info_skips_formats_with_zero_height() {
+        let json = json!({
+            "title": "Test Video",
+            "uploader": "Test Author",
+            "webpage_url": "https://example.com/video",
+            "extractor_key": "generic",
+            "formats": [
+                {
+                    "height": 0,
+                    "width": 0,
+                    "tbr": 8000.0,
+                    "vcodec": "avc1.640028",
+                    "acodec": "mp4a.40.2"
+                },
+                {
+                    "height": 720,
+                    "width": 1280,
+                    "tbr": 4000.0,
+                    "vcodec": "avc1.4d401f",
+                    "acodec": "mp4a.40.2"
+                }
+            ]
+        });
+
+        let result = GenericYtdlpDownloader::parse_video_info(&json).unwrap();
+
+        assert_eq!(result.available_qualities.len(), 1);
+        assert_eq!(result.available_qualities[0].height, 720);
+    }
+
+    #[test]
+    fn test_parse_video_info_adds_best_when_no_valid_formats() {
+        let json = json!({
+            "title": "Test Video",
+            "uploader": "Test Author",
+            "webpage_url": "https://example.com/video",
+            "extractor_key": "generic",
+            "formats": [
+                {
+                    "height": 0,
+                    "width": 0,
+                    "tbr": 8000.0,
+                    "vcodec": "none",
+                    "acodec": "mp4a.40.2"
+                }
+            ]
+        });
+
+        let result = GenericYtdlpDownloader::parse_video_info(&json).unwrap();
+
+        assert_eq!(result.available_qualities.len(), 1);
+        assert_eq!(result.available_qualities[0].label, "best");
+    }
+
+    #[test]
+    fn test_parse_video_info_audio_only() {
+        let json = json!({
+            "title": "Test Audio",
+            "uploader": "Test Author",
+            "webpage_url": "https://example.com/audio",
+            "extractor_key": "generic",
+            "formats": [
+                {
+                    "height": 0,
+                    "width": 0,
+                    "tbr": 128.0,
+                    "vcodec": "none",
+                    "acodec": "mp4a.40.2"
+                },
+                {
+                    "height": 0,
+                    "width": 0,
+                    "tbr": 256.0,
+                    "vcodec": "none",
+                    "acodec": "mp4a.40.5"
+                }
+            ]
+        });
+
+        let result = GenericYtdlpDownloader::parse_video_info(&json).unwrap();
+
+        assert_eq!(result.media_type, MediaType::Audio);
+        assert_eq!(result.available_qualities.len(), 1);
+        assert_eq!(result.available_qualities[0].label, "best");
+    }
+
+    #[test]
+    fn test_parse_video_info_mixed_tbr_and_filesize() {
+        let json = json!({
+            "title": "Test Video",
+            "uploader": "Test Author",
+            "webpage_url": "https://example.com/video",
+            "extractor_key": "generic",
+            "formats": [
+                {
+                    "height": 1080,
+                    "width": 1920,
+                    "filesize": 200_000_000,
+                    "vcodec": "avc1.640028",
+                    "acodec": "mp4a.40.2"
+                },
+                {
+                    "height": 1080,
+                    "width": 1920,
+                    "tbr": 8000.0,
+                    "vcodec": "vp09.00.50.08",
+                    "acodec": "mp4a.40.2"
+                },
+                {
+                    "height": 720,
+                    "width": 1280,
+                    "tbr": 4000.0,
+                    "vcodec": "avc1.4d401f",
+                    "acodec": "mp4a.40.2"
+                },
+                {
+                    "height": 720,
+                    "width": 1280,
+                    "filesize": 100_000_000,
+                    "vcodec": "vp09.00.40.08",
+                    "acodec": "mp4a.40.2"
+                }
+            ]
+        });
+
+        let result = GenericYtdlpDownloader::parse_video_info(&json).unwrap();
+
+        assert_eq!(result.available_qualities.len(), 2);
+        assert_eq!(result.available_qualities[0].height, 1080);
+        assert_eq!(result.available_qualities[1].height, 720);
+    }
 }

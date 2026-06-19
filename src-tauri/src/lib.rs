@@ -446,22 +446,34 @@ pub fn run() {
                     .ok();
             }
 
+            let app_for_deps = app.handle().clone();
             std::thread::Builder::new()
                 .name("startup-checks".into())
-                .spawn(|| {
+                .spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
                         .expect("startup runtime");
                     rt.block_on(async {
-                        if let Some(ytdlp) = core::ytdlp::find_ytdlp_cached().await {
-                            match core::ytdlp::check_ytdlp_update(&ytdlp).await {
-                                Ok(true) => tracing::info!("yt-dlp updated successfully"),
-                                Ok(false) => tracing::debug!("yt-dlp already up to date"),
-                                Err(e) => tracing::warn!("yt-dlp update check failed: {}", e),
+                        match core::ytdlp::ensure_ytdlp().await {
+                            Ok(path) => {
+                                tracing::info!("[startup] yt-dlp ready at {}", path.display());
+                                match core::ytdlp::check_ytdlp_update(&path).await {
+                                    Ok(true) => tracing::info!("yt-dlp updated successfully"),
+                                    Ok(false) => tracing::debug!("yt-dlp already up to date"),
+                                    Err(e) => tracing::warn!("yt-dlp update check failed: {}", e),
+                                }
                             }
+                            Err(e) => tracing::warn!("[startup] yt-dlp auto-install failed: {}", e),
+                        }
+                        match core::dependencies::ensure_ffmpeg().await {
+                            Ok(path) => {
+                                tracing::info!("[startup] ffmpeg ready at {}", path.display());
+                            }
+                            Err(e) => tracing::warn!("[startup] ffmpeg auto-install failed: {}", e),
                         }
                         core::dependencies::ensure_js_runtime().await;
+                        let _ = tauri::Emitter::emit(&app_for_deps, "bundled-deps-ready", ());
                     });
                 })
                 .ok();

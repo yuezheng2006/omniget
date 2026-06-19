@@ -7,6 +7,8 @@
   import { refreshYtdlpStatus } from "$lib/stores/dependency-store.svelte";
   import Mascot from "$components/mascot/Mascot.svelte";
 
+  const BUNDLED_DEPS = new Set(["yt-dlp", "FFmpeg"]);
+
   type DependencyStatus = {
     name: string;
     installed: boolean;
@@ -44,9 +46,21 @@
 
   $effect(() => {
     if (step === 3) {
-      loadDeps();
+      void autoPrepareDeps();
     }
   });
+
+  async function autoPrepareDeps() {
+    try {
+      const list = await invoke<DependencyStatus[]>("check_dependencies");
+      deps = list;
+      for (const dep of list) {
+        if (!dep.installed) {
+          await handleInstallDep(dep.name);
+        }
+      }
+    } catch {}
+  }
 
   async function loadDeps() {
     try {
@@ -146,7 +160,7 @@
             <select
               id="onboarding-language"
               class="language-select"
-              value={settings?.appearance.language ?? "en"}
+              value={settings?.appearance.language ?? "zh"}
               onchange={changeLanguage}
             >
               <option value="en">English</option>
@@ -220,7 +234,7 @@
                     <span class="dep-version dep-missing">{$t("settings.dependencies.not_found")}</span>
                   {/if}
                 </div>
-                {#if installingDep === dep.name}
+                {#if installingDep === dep.name || (!dep.installed && BUNDLED_DEPS.has(dep.name))}
                   <span class="dep-spinner"></span>
                 {:else if !dep.installed}
                   <button class="button dep-btn" onclick={() => handleInstallDep(dep.name)}>
@@ -234,7 +248,7 @@
               </div>
             {/each}
           </div>
-          {#if deps.some((d) => !d.installed) && installingDep === null}
+          {#if deps.some((d) => !d.installed && !BUNDLED_DEPS.has(d.name)) && installingDep === null}
             <button class="button install-all-btn" onclick={handleInstallAll}>
               {$t("onboarding.deps_install_all")}
             </button>
