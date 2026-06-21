@@ -1,0 +1,168 @@
+name: i18n Coverage Check
+
+on:
+  pull_request:
+    paths:
+      - 'src/lib/i18n/**'
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/lib/i18n/**'
+
+jobs:
+  check-coverage:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Make script executable
+        run: chmod +x scripts/check-i18n-coverage.cjs
+
+      - name: Check i18n coverage
+        id: coverage
+        run: |
+          echo "## 🌍 i18n 翻译覆盖率报告" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # 运行覆盖率检查并保存输出
+          node scripts/check-i18n-coverage.cjs > coverage_report.txt 2>&1 || true
+
+          # 将报告添加到 GitHub Step Summary
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat coverage_report.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          # 提取中文覆盖率
+          ZH_COVERAGE=$(node -e "
+            const fs = require('fs');
+            const zh = JSON.parse(fs.readFileSync('src/lib/i18n/zh.json', 'utf8'));
+            const en = JSON.parse(fs.readFileSync('src/lib/i18n/en.json', 'utf8'));
+
+            function getAllKeys(obj, prefix = '') {
+              const keys = [];
+              for (const [key, value] of Object.entries(obj)) {
+                const fullKey = prefix ? \\\`\\\${prefix}.\\\${key}\\\` : key;
+                if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+                  keys.push(...getAllKeys(value, fullKey));
+                } else {
+                  keys.push({ key: fullKey, value });
+                }
+              }
+              return keys;
+            }
+
+            const enKeys = getAllKeys(en);
+            const zhKeys = getAllKeys(zh);
+            const zhMap = new Map(zhKeys.map(k => [k.key, k.value]));
+            const enMap = new Map(enKeys.map(k => [k.key, k.value]));
+
+            let untranslated = 0;
+            enKeys.forEach(({ key, value: enValue }) => {
+              if (zhMap.has(key)) {
+                const zhValue = zhMap.get(key);
+                if (zhValue === enValue && /[a-zA-Z]/.test(zhValue)) {
+                  untranslated++;
+                }
+              } else {
+                untranslated++;
+              }
+            });
+
+            const coverage = ((enKeys.length - untranslated) / enKeys.length) * 100;
+            console.log(coverage.toFixed(2));
+          ")
+
+          echo "ZH_COVERAGE=$ZH_COVERAGE" >> $GITHUB_OUTPUT
+          echo "zh_coverage=$ZH_COVERAGE" >> $GITHUB_ENV
+
+      - name: Check minimum coverage
+        run: |
+          MIN_COVERAGE=50
+          CURRENT_COVERAGE=${{ steps.coverage.outputs.ZH_COVERAGE }}
+
+          echo "当前中文覆盖率: $CURRENT_COVERAGE%"
+          echo "最低要求覆盖率: $MIN_COVERAGE%"
+
+          if (( $(echo "$CURRENT_COVERAGE < $MIN_COVERAGE" | bc -l) )); then
+            echo "::warning::⚠️ 中文翻译覆盖率 ($CURRENT_COVERAGE%) 低于最低要求 ($MIN_COVERAGE%)"
+            echo "请考虑补充翻译以提升用户体验。参考: .github/CONTRIBUTING_i18n.md"
+          else
+            echo "✅ 中文翻译覆盖率达标"
+          fi
+
+      - name: Comment on PR (if PR)
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const coverage = '${{ steps.coverage.outputs.ZH_COVERAGE }}';
+            const minCoverage = 50;
+            const status = parseFloat(coverage) >= minCoverage ? '✅' : '⚠️';
+
+            const body = `## ${status} i18n 翻译覆盖率检查
+
+            **中文 (zh) 覆盖率**: ${coverage}%
+            **最低要求**: ${minCoverage}%
+
+            ${parseFloat(coverage) >= minCoverage
+              ? '✅ 覆盖率达标！'
+              : '⚠️ 覆盖率低于最低要求，建议补充翻译。'}
+
+            <details>
+            <summary>📊 查看详细报告</summary>
+
+            运行以下命令查看详细的翻译缺失情况：
+            \`\`\`bash
+            node scripts/check-i18n-coverage.js zh
+            \`\`\`
+
+            参考翻译贡献指南: [CONTRIBUTING_i18n.md](.github/CONTRIBUTING_i18n.md)
+            </details>
+            `;
+
+            // 查找已有的评论
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' &&
+              comment.body.includes('i18n 翻译覆盖率检查')
+            );
+
+            if (botComment) {
+              // 更新现有评论
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              // 创建新评论
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: i18n-coverage-report
+          path: coverage_report.txt
+          retention-days: 30
