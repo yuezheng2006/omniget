@@ -240,3 +240,5 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+# i18n tracker local history (per-developer coverage trend snapshots)
+.i18n-cache/
